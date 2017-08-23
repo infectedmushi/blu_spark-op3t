@@ -1,4 +1,4 @@
-/* Copyright (c) 2014-2016, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2014-2017, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -692,6 +692,7 @@ struct fg_trans {
 	struct fg_chip *chip;
 	struct fg_log_buffer *log; /* log buffer */
 	u8 *data;	/* fg data that is read */
+	struct mutex memif_dfs_lock; /* Prevent thread concurrency */
 };
 
 struct fg_dbgfs {
@@ -1979,9 +1980,11 @@ static void fg_handle_battery_insertion(struct fg_chip *chip)
 {
 	reinit_completion(&chip->batt_id_avail);
 	reinit_completion(&chip->fg_reset_done);
-	schedule_delayed_work(&chip->batt_profile_init, 0);
+	queue_delayed_work(system_power_efficient_wq,
+		&chip->batt_profile_init, 0);
 	cancel_delayed_work(&chip->update_sram_data);
-	schedule_delayed_work(&chip->update_sram_data, msecs_to_jiffies(0));
+	queue_delayed_work(system_power_efficient_wq,
+		&chip->update_sram_data, msecs_to_jiffies(0));
 }
 
 
@@ -2320,7 +2323,7 @@ static int set_prop_jeita_temp(struct fg_chip *chip,
 
 	cancel_delayed_work_sync(
 		&chip->update_jeita_setting);
-	schedule_delayed_work(
+	queue_delayed_work(system_power_efficient_wq,
 		&chip->update_jeita_setting, 0);
 
 	return rc;
@@ -2660,7 +2663,7 @@ try_again:
 		chip->last_beat_count = beat_count;
 	}
 resched:
-	schedule_delayed_work(
+	queue_delayed_work(system_power_efficient_wq,
 		&chip->check_sanity_work,
 		msecs_to_jiffies(SANITY_CHECK_PERIOD_MS));
 out:
@@ -2699,7 +2702,7 @@ wait:
 
 out:
 	if (!rc)
-		schedule_delayed_work(
+		queue_delayed_work(system_power_efficient_wq,
 			&chip->update_sram_data,
 			msecs_to_jiffies(resched_ms));
 }
@@ -2818,7 +2821,7 @@ out:
 	fg_relax(&chip->update_temp_wakeup_source);
 
 resched:
-	schedule_delayed_work(
+	queue_delayed_work(system_power_efficient_wq,
 		&chip->update_temp_work,
 		msecs_to_jiffies(TEMP_PERIOD_UPDATE_MS));
 }
@@ -4024,7 +4027,8 @@ static void status_change_work(struct work_struct *work)
 		 */
 		if (chip->last_temp_update_time && chip->soc_slope_limiter_en) {
 			cancel_delayed_work_sync(&chip->update_temp_work);
-			schedule_delayed_work(&chip->update_temp_work,
+			queue_delayed_work(system_power_efficient_wq,
+				&chip->update_temp_work,
 				msecs_to_jiffies(0));
 		}
 
@@ -4040,7 +4044,8 @@ static void status_change_work(struct work_struct *work)
 		 */
 		if (chip->last_sram_update_time + 5 < current_time) {
 			cancel_delayed_work(&chip->update_sram_data);
-			schedule_delayed_work(&chip->update_sram_data,
+			queue_delayed_work(system_power_efficient_wq,
+				&chip->update_sram_data,
 				msecs_to_jiffies(0));
 		}
 
@@ -4480,7 +4485,6 @@ static enum power_supply_property fg_power_props[] = {
 	POWER_SUPPLY_PROP_BATTERY_INFO,
 	POWER_SUPPLY_PROP_BATTERY_INFO_ID,
 	POWER_SUPPLY_PROP_BATTERY_4P4V_PRESENT,
-	POWER_SUPPLY_PROP_BATTERY_HEALTH,
 
 };
 
@@ -4571,15 +4575,6 @@ static int fg_power_get_property(struct power_supply *psy,
 		break;
 	case POWER_SUPPLY_PROP_BATTERY_4P4V_PRESENT:
 		val->intval = chip->battery_4p4v_present;
-		break;
-	case POWER_SUPPLY_PROP_BATTERY_HEALTH:
-		if (chip->use_external_fg && external_fg
-				&& external_fg->get_batt_health)
-			val->intval = external_fg->get_batt_health();
-		else if (get_extern_fg_regist_done() == false)
-			val->intval = -1;
-		else
-			val->intval = -1;
 		break;
 	case POWER_SUPPLY_PROP_UPDATE_NOW:
 		val->intval = 0;
@@ -5226,7 +5221,8 @@ static irqreturn_t fg_vbatt_low_handler(int irq, void *_chip)
 			disable_irq_nosync(chip->batt_irq[VBATT_LOW].irq);
 			chip->vbat_low_irq_enabled = false;
 			fg_stay_awake(&chip->empty_check_wakeup_source);
-			schedule_delayed_work(&chip->check_empty_work,
+			queue_delayed_work(system_power_efficient_wq,
+				&chip->check_empty_work,
 				msecs_to_jiffies(FG_EMPTY_DEBOUNCE_MS));
 		} else {
 			if (fg_debug_mask & FG_IRQS)
@@ -5358,7 +5354,8 @@ static irqreturn_t fg_soc_irq_handler(int irq, void *_chip)
 		msoc = get_monotonic_soc_raw(chip);
 		if (msoc == 0 || chip->soc_empty) {
 			fg_stay_awake(&chip->empty_check_wakeup_source);
-			schedule_delayed_work(&chip->check_empty_work,
+			queue_delayed_work(system_power_efficient_wq,
+				&chip->check_empty_work,
 				msecs_to_jiffies(FG_EMPTY_DEBOUNCE_MS));
 		}
 	}
@@ -5418,7 +5415,8 @@ static irqreturn_t fg_empty_soc_irq_handler(int irq, void *_chip)
 		pr_info("triggered 0x%x\n", soc_rt_sts);
 	if (fg_is_batt_empty(chip)) {
 		fg_stay_awake(&chip->empty_check_wakeup_source);
-		schedule_delayed_work(&chip->check_empty_work,
+		queue_delayed_work(system_power_efficient_wq,
+			&chip->check_empty_work,
 			msecs_to_jiffies(FG_EMPTY_DEBOUNCE_MS));
 	} else {
 		chip->soc_empty = false;
@@ -6135,7 +6133,8 @@ try_again:
 
 			if (!tried_once) {
 				cancel_delayed_work(&chip->update_sram_data);
-				schedule_delayed_work(&chip->update_sram_data,
+				queue_delayed_work(system_power_efficient_wq,
+					&chip->update_sram_data,
 					msecs_to_jiffies(0));
 				msleep(1000);
 				tried_once = true;
@@ -6656,11 +6655,11 @@ no_profile:
 	return rc;
 update:
 	cancel_delayed_work(&chip->update_sram_data);
-	schedule_delayed_work(
+	queue_delayed_work(system_power_efficient_wq,
 		&chip->update_sram_data,
 		msecs_to_jiffies(0));
 reschedule:
-	schedule_delayed_work(
+	queue_delayed_work(system_power_efficient_wq,
 		&chip->batt_profile_init,
 		msecs_to_jiffies(BATTERY_PSY_WAIT_MS));
 	fg_relax(&chip->profile_wakeup_source);
@@ -7606,6 +7605,7 @@ static int fg_memif_data_open(struct inode *inode, struct file *file)
 	trans->addr = dbgfs_data.addr;
 	trans->chip = dbgfs_data.chip;
 	trans->offset = trans->addr;
+	mutex_init(&trans->memif_dfs_lock);
 
 	file->private_data = trans;
 	return 0;
@@ -7617,6 +7617,7 @@ static int fg_memif_dfs_close(struct inode *inode, struct file *file)
 
 	if (trans && trans->log && trans->data) {
 		file->private_data = NULL;
+		mutex_destroy(&trans->memif_dfs_lock);
 		kfree(trans->log);
 		kfree(trans->data);
 		kfree(trans);
@@ -7774,10 +7775,13 @@ static ssize_t fg_memif_dfs_reg_read(struct file *file, char __user *buf,
 	size_t ret;
 	size_t len;
 
+	mutex_lock(&trans->memif_dfs_lock);
 	/* Is the the log buffer empty */
 	if (log->rpos >= log->wpos) {
-		if (get_log_data(trans) <= 0)
-			return 0;
+		if (get_log_data(trans) <= 0) {
+			len = 0;
+			goto unlock_mutex;
+		}
 	}
 
 	len = min(count, log->wpos - log->rpos);
@@ -7785,7 +7789,8 @@ static ssize_t fg_memif_dfs_reg_read(struct file *file, char __user *buf,
 	ret = copy_to_user(buf, &log->data[log->rpos], len);
 	if (ret == len) {
 		pr_err("error copy sram register values to user\n");
-		return -EFAULT;
+		len = -EFAULT;
+		goto unlock_mutex;
 	}
 
 	/* 'ret' is the number of bytes not copied */
@@ -7793,6 +7798,9 @@ static ssize_t fg_memif_dfs_reg_read(struct file *file, char __user *buf,
 
 	*ppos += len;
 	log->rpos += len;
+
+unlock_mutex:
+	mutex_unlock(&trans->memif_dfs_lock);
 	return len;
 }
 
@@ -7813,14 +7821,20 @@ static ssize_t fg_memif_dfs_reg_write(struct file *file, const char __user *buf,
 	int cnt = 0;
 	u8  *values;
 	size_t ret = 0;
+	char *kbuf;
+	u32 offset;
 
 	struct fg_trans *trans = file->private_data;
-	u32 offset = trans->offset;
+
+	mutex_lock(&trans->memif_dfs_lock);
+	offset = trans->offset;
 
 	/* Make a copy of the user data */
-	char *kbuf = kmalloc(count + 1, GFP_KERNEL);
-	if (!kbuf)
-		return -ENOMEM;
+	kbuf = kmalloc(count + 1, GFP_KERNEL);
+	if (!kbuf) {
+		ret = -ENOMEM;
+		goto unlock_mutex;
+	}
 
 	ret = copy_from_user(kbuf, buf, count);
 	if (ret == count) {
@@ -7859,6 +7873,8 @@ static ssize_t fg_memif_dfs_reg_write(struct file *file, const char __user *buf,
 
 free_buf:
 	kfree(kbuf);
+unlock_mutex:
+	mutex_unlock(&trans->memif_dfs_lock);
 	return ret;
 }
 
@@ -8528,7 +8544,8 @@ out:
 	fg_enable_irqs(chip, true);
 	update_sram_data_work(&chip->update_sram_data.work);
 	update_temp_data(&chip->update_temp_work.work);
-	schedule_delayed_work(&chip->check_sanity_work,
+	queue_delayed_work(system_power_efficient_wq,
+		&chip->check_sanity_work,
 		msecs_to_jiffies(1000));
 	chip->ima_error_handling = false;
 	mutex_unlock(&chip->ima_recovery_lock);
@@ -8657,7 +8674,7 @@ static void delayed_init_work(struct work_struct *work)
 	/* release memory access before update_sram_data is called */
 	fg_mem_release(chip);
 
-	schedule_delayed_work(
+	queue_delayed_work(system_power_efficient_wq,
 		&chip->update_jeita_setting,
 		msecs_to_jiffies(INIT_JEITA_DELAY_MS));
 
@@ -8668,10 +8685,12 @@ static void delayed_init_work(struct work_struct *work)
 		update_temp_data(&chip->update_temp_work.work);
 
 	if (!chip->use_otp_profile)
-		schedule_delayed_work(&chip->batt_profile_init, 0);
+		queue_delayed_work(system_power_efficient_wq,
+			&chip->batt_profile_init, 0);
 
 	if (chip->ima_supported && fg_reset_on_lockup)
-		schedule_delayed_work(&chip->check_sanity_work,
+		queue_delayed_work(system_power_efficient_wq,
+			&chip->check_sanity_work,
 			msecs_to_jiffies(1000));
 
 	if (chip->wa_flag & IADC_GAIN_COMP_WA) {
@@ -8976,7 +8995,7 @@ static void check_and_update_sram_data(struct fg_chip *chip)
 	else
 		time_left = 0;
 
-	schedule_delayed_work(
+	queue_delayed_work(system_power_efficient_wq,
 		&chip->update_temp_work, msecs_to_jiffies(time_left * 1000));
 
 	next_update_time = chip->last_sram_update_time
@@ -8987,7 +9006,7 @@ static void check_and_update_sram_data(struct fg_chip *chip)
 	else
 		time_left = 0;
 
-	schedule_delayed_work(
+	queue_delayed_work(system_power_efficient_wq,
 		&chip->update_sram_data, msecs_to_jiffies(time_left * 1000));
 }
 
@@ -9097,7 +9116,8 @@ static int fg_reset_lockup_set(const char *val, const struct kernel_param *kp)
 		pr_info("fg_reset_on_lockup set to %d\n", fg_reset_on_lockup);
 
 	if (fg_reset_on_lockup)
-		schedule_delayed_work(&chip->check_sanity_work,
+		queue_delayed_work(system_power_efficient_wq,
+			&chip->check_sanity_work,
 			msecs_to_jiffies(1000));
 	else
 		cancel_delayed_work_sync(&chip->check_sanity_work);
