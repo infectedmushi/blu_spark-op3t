@@ -1,0 +1,6 @@
+export ARCH=arm64
+export SUB_ARCH=arm64
+export CROSS_COMPILE=/mnt/Building/aarch64-linux-android-8.x/bin/aarch64-linux-android-
+make blu_spark_defconfig
+make menuconfig
+make -j16
